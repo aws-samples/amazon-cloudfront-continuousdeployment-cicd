@@ -1,0 +1,416 @@
+# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+# SPDX-License-Identifier: MIT-0
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of this
+# software and associated documentation files (the "Software"), to deal in the Software
+# without restriction, including without limitation the rights to use, copy, modify,
+# merge, publish, distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+# PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+# OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+# SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Template for creating infrastructure and dependencies for CloudFront Continuous Deployment via CodePipeline CI/CD'
+
+Parameters:
+  pRepositoryName:
+    Default: CloudFront-ContinuousDeployment
+    Description: Name of the repository for CloudFront Continuous Deployment Infrastructure Code
+    Type: String
+  pPipelineName:
+    Description: A name for pipeline
+    Type: String
+    Default: CloudFront-ContinuousDeployment-Pipeline
+  pCloudFormationStackName:
+    Default: staging_cloudfront_distribution
+    Description: Name of the Infrastructure Stack in the Development Account
+    Type: String
+  pCloudFormationFileName:
+    Description: The file name of the stack in Development
+    Type: String
+    Default: cloudfront.yml
+  pProductionCloudFrontID:
+    Description: CloudFront Production ID for Lambda promotion function
+    Type: String
+  pApprovalEmail:
+    Description: Email endpoint for approval of CodePipeline promotion to production
+    Type: String
+
+Metadata:
+  IAMPermissions:
+    Description: This template includes a full CloudFront permissions managed policy for the different CloudFront changes that could be done with Continuous Deployment
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: 'CodeCommit Settings'
+        Parameters:
+          - pRepositoryName
+      - Label:
+          default: 'Pipeline Settings'
+        Parameters:
+          - pPipelineName
+          - pCloudFormationStackName
+          - pCloudFormationFileName
+          - pApprovalEmail
+      - Label:
+          defualt: 'Lambda Settings'
+        Parameters:
+          - pProductionCloudFrontID
+    ParameterLabels:
+      pRepositoryName:
+        default: 'What do you want to name your repository?'
+      pPipelineName:
+        default: 'What do you want to name your pipeline?'
+      pCloudFormationFileName:
+        default: 'What is the name of the file you will upload into your repository to create the staging distribution and continuous deployment policy?'
+      pCloudFormationStackName:
+        default: 'What do you want to name the stack created through the pipeline?'
+      pApprovalEmail:
+        default: 'What is the email endpoint for indicating for pipeline manual approval?'
+      pProductionCloudFrontID:
+        default: "What is the CloudFront Production distribution ID?"
+
+Resources:
+  rArtifactStoreBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      LoggingConfiguration:
+        LogFilePrefix: "codepipeline-artifact-accesslogs"
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      
+  rArtifactStoreBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref rArtifactStoreBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: 'DenyUnEncryptedObjectUploads'
+            Effect: Deny
+            Principal: '*'
+            Action: 
+              - 's3:PutObject'
+            Resource: !Sub
+              - 'arn:aws:s3:::${Bucket}/*'
+              - Bucket: !Ref rArtifactStoreBucket
+            Condition:
+              StringNotEquals:
+                's3:x-amz-server-side-encryption': 'aws:kms'
+          - Sid: 'DenyInsecureConnections'
+            Effect: Deny
+            Principal: '*'
+            Action: 
+              - 's3:*'
+            Resource: !Sub
+              - 'arn:aws:s3:::${Bucket}/*'
+              - Bucket: !Ref rArtifactStoreBucket
+            Condition:
+              Bool:
+                'aws:SecureTransport': 'false'
+
+  rRepository:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: !Ref pRepositoryName
+      RepositoryDescription: Repository for CloudFront Continuous Deployment
+
+  rCodePipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      ArtifactStore:
+        Location: !Ref rArtifactStoreBucket
+        Type: S3
+      Name: !Ref pPipelineName
+      RoleArn: !GetAtt [rCodePipelineRole, Arn]
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: '1'
+              Configuration:
+                BranchName: 'main'
+                RepositoryName: !GetAtt rRepository.Name
+              OutputArtifacts:
+                - Name: SourceArtifactOutput
+              RunOrder: '1'
+        - Name: Deploy
+          Actions:
+            - Name: Deploy_to_Staging
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceArtifactOutput
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_IAM,CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+                RoleArn: !GetAtt rCloudFormationRole.Arn
+                StackName: !Ref pCloudFormationStackName
+                TemplatePath: !Sub SourceArtifactOutput::${pCloudFormationFileName}
+              OutputArtifacts:
+                - Name: CloudFormationOutputs
+              Namespace: CFOutput
+              RunOrder: '2'
+        - Name: ManualApproval
+          Actions:
+            - Name: ManualApproval
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: '1'
+              Configuration:
+                NotificationArn: !Ref rCodePipelineSNSTopic
+                CustomData: !Sub 'A new staging distribution was created for the Production ${pProductionCloudFrontID} CloudFormation distribution. Do you want to implement the changes?'
+              RunOrder: '3'
+        - Name: Promotion
+          Actions:
+            - Name: Promote_to_Production
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: '1'
+              InputArtifacts:
+                - Name: CloudFormationOutputs
+              Configuration:
+                FunctionName: !Ref rPromoteLambda
+                UserParameters: '#{CFOutput.oStagingCFDistribution}'
+              RunOrder: '4'             
+
+  rCodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Join ['-', ['CodePipelinePolicy', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                - iam:PassRole
+                Resource: !Sub arn:aws:iam::${AWS::AccountId}:role/${rCloudFormationRole}
+                Effect: Allow
+                Condition:
+                  StringEqualsIfExists:
+                    iam:PassedToService:
+                    - cloudformation.amazonaws.com
+              - Action:
+                - codecommit:CancelUploadArchive
+                - codecommit:GetBranch
+                - codecommit:GetCommit
+                - codecommit:GetUploadArchiveStatus
+                - codecommit:UploadArchive
+                Resource: '*'
+                Effect: Allow
+              - Action:
+                - s3:PutObject
+                - s3:GetObject
+                - s3:GetObjectVersion
+                - s3:DeleteObject
+                - s3:DeleteObjectVersion
+                Resource: !Sub 'arn:aws:s3:::${rArtifactStoreBucket}/*'
+                Effect: Allow
+              - Action:
+                - s3:ListAllMyBuckets
+                - s3:GetBucketLocation
+                Resource: '*'
+                Effect: Allow
+              - Action:
+                - cloudformation:CreateStack
+                - cloudformation:DeleteStack
+                - cloudformation:DescribeStacks
+                - cloudformation:UpdateStack
+                - cloudformation:CreateChangeSet
+                - cloudformation:DeleteChangeSet
+                - cloudformation:DescribeChangeSet
+                - cloudformation:ExecuteChangeSet
+                - cloudformation:SetStackPolicy
+                - cloudformation:ValidateTemplate
+                Resource: 
+                  - '*'
+                Effect: Allow
+              - Action: 
+                  - 'sns:Publish'
+                Resource:
+                  - "*"
+                Effect: Allow
+              - Action:
+                  - lambda:InvokeFunction
+                Resource:
+                  - '*'
+                Effect: Allow
+      Path: /
+
+  rCloudFormationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ManagedPolicyArns:
+        -  !Sub "arn:aws:iam::${AWS::Partition}:policy/CloudFrontFullAccess"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - cloudformation.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: !Join ['-', ['CodePipeline-CloudFormationPermissions', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - cloudformation:CreateStack
+                  - cloudformation:DeleteStack
+                  - cloudformation:DescribeStacks
+                  - cloudformation:UpdateStack
+                  - cloudformation:CreateChangeSet
+                  - cloudformation:DeleteChangeSet
+                  - cloudformation:DescribeChangeSet
+                  - cloudformation:ExecuteChangeSet
+                  - cloudformation:SetStackPolicy'
+                  - cloudformation:ValidateTemplate
+                Resource: '*'
+      Path: /
+
+  rCodePipelineSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties: 
+      TopicName: CloudFrontPromotionApprovalTopic
+      KmsMasterKeyId: alias/aws/sns
+      Subscription: 
+        - Endpoint: !Ref pApprovalEmail
+          Protocol: email
+
+  rPromoteLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ['-', ['CloudFrontPromotionLambda', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+      Runtime: python3.9
+      Role: !GetAtt rPromoteLambdaRole.Arn
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Timeout: 60
+      ReservedConcurrentExecutions: 5
+      Environment:
+        Variables:
+          PRD_DISTRIBUTION_ID: !Ref pProductionCloudFrontID
+      Code:
+        ZipFile: |
+          import sys
+          from pip._internal import main
+
+          main(['install', '-I', '-q', 'boto3', '--target', '/tmp/', '--no-cache-dir', '--disable-pip-version-check'])
+          sys.path.insert(0,'/tmp/')
+
+          import boto3
+          import json
+          import logging
+          import os
+
+          def lambda_handler(event, context):
+              print(event)
+              logger = logging.getLogger()
+              logger.setLevel(logging.INFO)
+              logger.debug(json.dumps(event))
+
+              cf = boto3.client('cloudfront')
+              codepipeline = boto3.client('codepipeline')
+              job_id = event['CodePipeline.job']['id']
+
+              STAGING_DISTRIBUTION = event['CodePipeline.job']['data']['actionConfiguration']['configuration']['UserParameters']
+              PRD_DISTRIBUTION = os.environ['PRD_DISTRIBUTION_ID']
+
+              try:
+                  logger.info('Example')
+                  
+                  # Grabbing ETags from Production
+                  PRD_ETag = cf.get_distribution(Id=PRD_DISTRIBUTION)['ETag']
+
+                  # Grabbing ETags from Staging
+                  STAGING_ETag = cf.get_distribution(Id=STAGING_DISTRIBUTION)['ETag']
+
+                  # Promoting Staging distribution to Production
+                  cf.update_distribution_with_staging_config(Id=PRD_DISTRIBUTION, StagingDistributionId=STAGING_DISTRIBUTION, IfMatch=f'{PRD_ETag}, {STAGING_ETag}')
+
+                  response = codepipeline.put_job_success_result(jobId=job_id)
+                  logger.debug(response)
+              
+              except Exception as error:
+                  logger.exception(error)
+                  response = codepipeline.put_job_failure_result(
+                      jobId=job_id,
+                      failureDetails={
+                      'type': 'JobFailed',
+                      'message': f'{error.__class__.__name__}: {str(error)}'
+                      }
+                  )
+                  logger.debug(response)
+
+  rPromoteLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Join ['-', ['LambdaPromotion', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        - !Sub "arn:aws:iam::${AWS::Partition}:policy/CloudFrontFullAccess"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+              - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+  
+  rPromoteLambdaPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Join ['-', ['PromoteLambdaPolicy', !Select [4, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]]]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - codepipeline:PutJobSuccessResult
+              - codepipeline:PutJobFailureResult
+            Resource: "*"
+      Roles:
+        - !Ref rPromoteLambdaRole
+
+Outputs:  
+  oProductionCFDistribution:
+    Description: Domain Name of the CloudFront Distribution
+    Value: !Ref pProductionCloudFrontID
+    Export:
+      Name: ProductionCloudFrontDistribution
