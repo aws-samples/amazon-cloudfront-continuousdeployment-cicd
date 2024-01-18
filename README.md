@@ -43,9 +43,16 @@ To use this solution, you should have the following prerequisites:
 
 2. Once deployed, browse to the CodeCommitt dashboard to find your newly created repository.
 
-3. Before putting the cloudfront.yml file within the newly created repository, you need to edit the file to reflect the continuous deployment policy information you desire for your setup. For our example, we will use the weight-based traffic shifting. Weight-based, more commonly referred to as a canary deployment, lets you define a percentage of your production traffic to push to your staging distribution. You can see that we are using a single weight configuration percentage of 10%.
+3. Create a new CloudFormation stack with the `pipeline.yml` file making sure to fill out the parameters. 
+- Repository Name for CodeCommit such as: `CloudFront-ContinuousDeployment`
+- Pipeline Name: `CloudFront-ContinuousDeployment-Pipeline`
+- A name for the stack the pipeline later creates: `staging_cloudfront_distribution`
+- The name of the file used for deploying the policy: `staging_cloudfront_distribution.yml`
+- An email address CodePipeline uses to send approval emails.
+- The CloudFront distribution ID for our existing production distribution.
+Deploy the stack and wait for it to finish. Part of the infrastructure deployed from the stack is an Amazon Simple Notification Service topic that needs to be confirmed via the email you entered as a parameter. 
 
-4. Before putting the staging_cloudfront_distribution.yml file within the newly created repository, you need to edit the file to reflect the continuous deployment policy information you desire for your setup. For our example, we will use the weight-based traffic shifting. Weight-based, more commonly referred to as a canary deployment, lets you define a percentage of your production traffic to push to your staging distribution. You can see that we are using a single weight configuration percentage of 10%.
+4. Before putting the `staging_cloudfront_distribution.yml` file within the newly created repository, you need to edit the file to reflect the continuous deployment policy information you desire for your setup. For our example, we will use the weight-based traffic shifting. Weight-based, more commonly referred to as a canary deployment, lets you define a percentage of your production traffic to push to your staging distribution. You can see that we are using a single weight configuration percentage of 10%.
 
 ```
   CFDistributionDeploymentPolicy:
@@ -61,27 +68,31 @@ To use this solution, you should have the following prerequisites:
             Type: SingleWeight
 ```
 
-5. To create the needed staging_cloudfront_distribution.yml file within the newly created repository, clone the empty repository down via HTTPS or SSH to create and push the staging_cloudfront_distribution.yml file. 
+5. To create the needed `staging_cloudfront_distribution.yml` file within the newly created repository, clone the empty repository down via HTTPS or SSH to create and push the `staging_cloudfront_distribution.yml` file. 
 
 6. Once the file is pushed to the repository, the CodePipeline will start its process which will deploy the new staging distribution with continuous deployment police via CloudFormation.
 
 7. After a couple minutes, the CloudFormation stack will finish. Browse to the CloudFormation console and locate the new stack. Browse to the output tab and copy the information for our next step. 
 
-8. Since we want to connect the current production CloudFront distribution with the newly created continuous deployment policy, we need to do a one-time deployment of the cloudfront_continuous_deployment_connection.yml that deploys the custom resource to connect the continuous deployment policy ID to the prodcution distribution. Make sure to update the parameters with the correct values as pulled from your environment. 
+8. Since we want to connect the current production CloudFront distribution with the newly created continuous deployment policy, we need to do a one-time deployment of the `cloudfront_continuous_deployment_connection.yml` that deploys the custom resource to connect the continuous deployment policy ID to the prodcution distribution. Make sure to update the parameters with the correct values as pulled from your environment. 
 
 9. Once these one-time commands are run, you can browse to your production CloudFront distribution to see the newly connected policy.
 
-10. At this point, you are ready to verify that the newly created staging distribution and continuous deployment policy is working as expected. For our example, we defined two different s3 back-ends for the primary and staging distributions. Our continuous deployment policy is configured to send 10% of our traffic to the staging environment s3 bucket back-end which hosts a different index.html file indicating the staging bucket. 
+10. At this point, you are ready to verify that the newly created staging distribution and continuous deployment policy are working as expected. For our example, we defined two different s3 back-ends for the primary and staging distributions. Our continuous deployment policy is configured to send 10% of our traffic to the staging environment s3 bucket back-end which hosts a different index.html file indicating the staging bucket. 
 
 After you have verified that the staging distribution is providing the results as expected, you can approve the manual approval stage to promote the change to production. You can watch the progress of this promotion within the CodePipeline console or within CloudFront itself. 
 
 After the promotion process is complete, you can verify the change was successful by browsing to the CloudFront production distribution endpoint to verify.
 
-Part of the promotion process for CloudFront is that the continuous deployment policy gets disabled. The solution we are presenting is designed to follow the process again of making changes to your staging_cloudfront_distribution.yaml and commit to your repository. The pipeline process will kick-off again to deploy and enable the continuous deployment policy for the production distribution. You can run through your verification process again before promoting any change to production through the manual approval stage. 
+Part of the promotion process for CloudFront is that the continuous deployment policy gets disabled. The solution we are presenting is designed to follow the process again of making changes to your `staging_cloudfront_distribution.yaml` and commit to your repository. The pipeline process will kick-off again to deploy and enable the continuous deployment policy for the production distribution. You can run through your verification process again before promoting any change to production through the manual approval stage. 
 
 ## Cleaning Up
 
 You may delete the resources that you created during this post in the following order:
 
-- staging_cloudfront_distribution CloudFormation Stack
-- CloudFront-ContinuousDeployment-Pipeline CloudFormation Stack
+- Delete the cfn-response CloudFormation stack.
+- Empty the artifact Amazon S3 bucket created from the CloudFront-ContinuousDeployment-Pipeline stack.
+- Delete the CloudFront Continuous Deployment policy from the production distribution.
+- Delete the staging_cloudfront_distribution CloudFormation Stack.
+- Delete the CloudFront-ContinuousDeployment-Pipeline CloudFormation Stack.
+
